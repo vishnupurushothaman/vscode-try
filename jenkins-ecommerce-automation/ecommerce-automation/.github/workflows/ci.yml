@@ -1,0 +1,142 @@
+name: Playwright E2E Test Suite
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run full suite nightly at 2am UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Which suite to run'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, ui, api, e2e, visual]
+
+env:
+  BASE_URL: ${{ secrets.BASE_URL || 'https://www.saucedemo.com' }}
+  API_BASE_URL: ${{ secrets.API_BASE_URL || 'https://reqres.in/api' }}
+  STANDARD_USER: ${{ secrets.STANDARD_USER || 'standard_user' }}
+  LOCKED_USER: ${{ secrets.LOCKED_USER || 'locked_out_user' }}
+  PROBLEM_USER: ${{ secrets.PROBLEM_USER || 'problem_user' }}
+  PERF_GLITCH_USER: ${{ secrets.PERF_GLITCH_USER || 'performance_glitch_user' }}
+  USER_PASSWORD: ${{ secrets.USER_PASSWORD || 'secret_sauce' }}
+  REQRES_API_KEY: ${{ secrets.REQRES_API_KEY || 'reqres-free-v1' }}
+  HEADLESS: 'true'
+  WORKERS: '4'
+
+jobs:
+  test:
+    name: ${{ matrix.browser }} — ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+        suite: [ui, api, e2e]
+        exclude:
+          - browser: firefox
+            suite: api
+          - browser: webkit
+            suite: api
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Run ${{ matrix.suite }} tests on ${{ matrix.browser }}
+        run: npx playwright test tests/${{ matrix.suite }} --project=${{ matrix.browser }}
+        env:
+          CI: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.browser }}-${{ matrix.suite }}
+          path: |
+            test-results/
+            allure-results/
+          retention-days: 14
+
+      - name: Upload Playwright HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.browser }}-${{ matrix.suite }}
+          path: playwright-report/
+          retention-days: 7
+
+  visual-tests:
+    name: Visual regression — chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run visual tests
+        run: npx playwright test tests/visual --project=chromium
+        env:
+          CI: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: visual-test-results
+          path: test-results/
+          retention-days: 14
+
+  allure-report:
+    name: Generate Allure Report
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all allure results
+        uses: actions/download-artifact@v4
+        with:
+          path: allure-results-combined
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Generate Allure Report
+        uses: simple-elf/allure-report-action@master
+        with:
+          allure_results: allure-results-combined
+          allure_report: allure-report
+          gh_pages: gh-pages
+          allure_history: allure-history
+
+      - name: Deploy Allure Report to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: allure-history

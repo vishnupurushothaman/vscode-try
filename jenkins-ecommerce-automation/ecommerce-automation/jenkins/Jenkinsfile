@@ -1,0 +1,264 @@
+// ============================================================
+// Jenkinsfile — E-Commerce Automation Suite
+// Declarative Pipeline
+// ============================================================
+
+pipeline {
+    agent any
+
+    // ---- Tool versions (configure these in Jenkins > Manage Jenkins > Tools) ----
+    tools {
+        nodejs 'NodeJS-20'
+    }
+
+    // ---- Build parameters — trigger specific suites from Jenkins UI ----
+    parameters {
+        choice(
+            name: 'TEST_SUITE',
+            choices: ['all', 'ui', 'api', 'e2e', 'visual'],
+            description: 'Which test suite to run'
+        )
+        choice(
+            name: 'BROWSER',
+            choices: ['all', 'chromium', 'firefox', 'webkit'],
+            description: 'Which browser(s) to run'
+        )
+        booleanParam(
+            name: 'RUN_VISUAL',
+            defaultValue: false,
+            description: 'Run visual regression tests'
+        )
+    }
+
+    // ---- Environment — secrets pulled from Jenkins credentials store ----
+    environment {
+        BASE_URL            = credentials('SAUCE_BASE_URL')
+        API_BASE_URL        = credentials('REQRES_API_BASE_URL')
+        STANDARD_USER       = credentials('SAUCE_STANDARD_USER')
+        USER_PASSWORD       = credentials('SAUCE_USER_PASSWORD')
+        LOCKED_USER         = credentials('SAUCE_LOCKED_USER')
+        PROBLEM_USER        = credentials('SAUCE_PROBLEM_USER')
+        PERF_GLITCH_USER    = credentials('SAUCE_PERF_GLITCH_USER')
+        REQRES_API_KEY      = credentials('REQRES_API_KEY')
+        HEADLESS            = 'true'
+        CI                  = 'true'
+        WORKERS             = '4'
+        ALLURE_RESULTS_DIR  = 'allure-results'
+        NODE_ENV            = 'test'
+    }
+
+    options {
+        // Keep last 10 builds
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        // Fail if pipeline hangs for more than 45 minutes
+        timeout(time: 45, unit: 'MINUTES')
+        // Timestamps in console output
+        timestamps()
+        // Retry the whole pipeline once on failure (optional)
+        // retry(1)
+    }
+
+    stages {
+
+        // ----------------------------------------------------------------
+        // Stage 1 — Checkout source
+        // ----------------------------------------------------------------
+        stage('Checkout') {
+            steps {
+                checkout scm
+                echo "Branch: ${env.BRANCH_NAME} | Build: ${env.BUILD_NUMBER}"
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Stage 2 — Install dependencies + Playwright browsers
+        // ----------------------------------------------------------------
+        stage('Install') {
+            steps {
+                sh 'node --version'
+                sh 'npm --version'
+                sh 'npm ci'
+                sh 'npx playwright install --with-deps chromium firefox webkit'
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Stage 3 — Type check + Lint
+        // ----------------------------------------------------------------
+        stage('Type Check & Lint') {
+            steps {
+                sh 'npx tsc --noEmit'
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Stage 4 — Run test suites in parallel across browsers
+        // ----------------------------------------------------------------
+        stage('Tests') {
+            parallel {
+
+                stage('UI — Chromium') {
+                    when {
+                        expression {
+                            params.BROWSER == 'all' || params.BROWSER == 'chromium'
+                        }
+                    }
+                    steps {
+                        sh """
+                            npx playwright test tests/ui tests/e2e \
+                                --project=chromium \
+                                --reporter=allure-playwright,list \
+                                --output=test-results/chromium
+                        """
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'test-results/chromium/**', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('UI — Firefox') {
+                    when {
+                        expression {
+                            params.BROWSER == 'all' || params.BROWSER == 'firefox'
+                        }
+                    }
+                    steps {
+                        sh """
+                            npx playwright test tests/ui tests/e2e \
+                                --project=firefox \
+                                --reporter=allure-playwright,list \
+                                --output=test-results/firefox
+                        """
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'test-results/firefox/**', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('UI — WebKit') {
+                    when {
+                        expression {
+                            params.BROWSER == 'all' || params.BROWSER == 'webkit'
+                        }
+                    }
+                    steps {
+                        sh """
+                            npx playwright test tests/ui tests/e2e \
+                                --project=webkit \
+                                --reporter=allure-playwright,list \
+                                --output=test-results/webkit
+                        """
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'test-results/webkit/**', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+                stage('API Tests') {
+                    steps {
+                        sh """
+                            npx playwright test tests/api \
+                                --project=chromium \
+                                --reporter=allure-playwright,list \
+                                --output=test-results/api
+                        """
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'test-results/api/**', allowEmptyArchive: true
+                        }
+                    }
+                }
+
+            } // end parallel
+        } // end Tests stage
+
+        // ----------------------------------------------------------------
+        // Stage 5 — Visual regression (conditional, off by default)
+        // ----------------------------------------------------------------
+        stage('Visual Regression') {
+            when {
+                expression { params.RUN_VISUAL == true }
+            }
+            steps {
+                sh """
+                    npx playwright test tests/visual \
+                        --project=chromium \
+                        --reporter=allure-playwright,list \
+                        --output=test-results/visual
+                """
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'test-results/visual/**', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Stage 6 — Generate Allure Report
+        // ----------------------------------------------------------------
+        stage('Allure Report') {
+            steps {
+                allure([
+                    includeProperties: false,
+                    jdk: '',
+                    properties: [],
+                    reportBuildPolicy: 'ALWAYS',
+                    results: [[path: 'allure-results']]
+                ])
+            }
+        }
+
+    } // end stages
+
+    // ----------------------------------------------------------------
+    // Post — always runs regardless of build result
+    // ----------------------------------------------------------------
+    post {
+        always {
+            echo "Build result: ${currentBuild.currentResult}"
+
+            // Publish Playwright HTML report as a Jenkins artifact
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: 'playwright-report',
+                reportFiles: 'index.html',
+                reportName: 'Playwright Report',
+                reportTitles: ''
+            ])
+
+            // Archive all allure results for history
+            archiveArtifacts artifacts: 'allure-results/**', allowEmptyArchive: true
+        }
+
+        success {
+            echo "✅ All tests passed — build ${env.BUILD_NUMBER}"
+        }
+
+        failure {
+            echo "❌ Tests failed — check Allure report for details"
+            // Uncomment to send email on failure:
+            // mail to: 'qa-team@yourcompany.com',
+            //      subject: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            //      body: "Check: ${env.BUILD_URL}"
+        }
+
+        unstable {
+            echo "⚠️ Build unstable — some tests may have been retried"
+        }
+
+        cleanup {
+            // Clean workspace after build to free agent disk space
+            cleanWs()
+        }
+    }
+}

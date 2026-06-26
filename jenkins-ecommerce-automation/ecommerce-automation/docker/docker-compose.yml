@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  playwright:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ../allure-results:/app/allure-results
+      - ../test-results:/app/test-results
+      - ../playwright-report:/app/playwright-report
+    environment:
+      - BASE_URL=${BASE_URL:-https://www.saucedemo.com}
+      - API_BASE_URL=${API_BASE_URL:-https://reqres.in/api}
+      - STANDARD_USER=${STANDARD_USER:-standard_user}
+      - USER_PASSWORD=${USER_PASSWORD:-secret_sauce}
+      - HEADLESS=true
+      - WORKERS=4
+    command: npx playwright test --reporter=allure-playwright,list
+
+  allure:
+    image: frankescobar/allure-docker-service
+    ports:
+      - "5050:5050"
+    volumes:
+      - ../allure-results:/app/allure-results
+      - ../allure-report:/app/default-reports
+    environment:
+      CHECK_RESULTS_EVERY_SECONDS: 3

@@ -1,0 +1,137 @@
+// ============================================================
+// Jenkinsfile.nightly — Full Nightly Regression
+// Runs all 200 tests across all 3 browsers every night
+// Schedule this as a separate Jenkins job
+// ============================================================
+
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'NodeJS-20'
+    }
+
+    triggers {
+        // Run at 2:00 AM every day
+        cron('0 2 * * *')
+    }
+
+    environment {
+        BASE_URL            = credentials('SAUCE_BASE_URL')
+        API_BASE_URL        = credentials('REQRES_API_BASE_URL')
+        STANDARD_USER       = credentials('SAUCE_STANDARD_USER')
+        USER_PASSWORD       = credentials('SAUCE_USER_PASSWORD')
+        LOCKED_USER         = credentials('SAUCE_LOCKED_USER')
+        PROBLEM_USER        = credentials('SAUCE_PROBLEM_USER')
+        PERF_GLITCH_USER    = credentials('SAUCE_PERF_GLITCH_USER')
+        REQRES_API_KEY      = credentials('REQRES_API_KEY')
+        HEADLESS            = 'true'
+        CI                  = 'true'
+        WORKERS             = '4'
+        ALLURE_RESULTS_DIR  = 'allure-results'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install') {
+            steps {
+                sh 'npm ci'
+                sh 'npx playwright install --with-deps chromium firefox webkit'
+            }
+        }
+
+        stage('Full Regression — All Browsers') {
+            parallel {
+
+                stage('Chromium — Full Suite') {
+                    steps {
+                        sh """
+                            npx playwright test \
+                                --project=chromium \
+                                --reporter=allure-playwright,list \
+                                --output=test-results/nightly-chromium
+                        """
+                    }
+                }
+
+                stage('Firefox — Full Suite') {
+                    steps {
+                        sh """
+                            npx playwright test tests/ui tests/e2e \
+                                --project=firefox \
+                                --reporter=allure-playwright,list \
+                                --output=test-results/nightly-firefox
+                        """
+                    }
+                }
+
+                stage('WebKit — Full Suite') {
+                    steps {
+                        sh """
+                            npx playwright test tests/ui tests/e2e \
+                                --project=webkit \
+                                --reporter=allure-playwright,list \
+                                --output=test-results/nightly-webkit
+                        """
+                    }
+                }
+
+            }
+        }
+
+        stage('Visual Regression') {
+            steps {
+                sh """
+                    npx playwright test tests/visual \
+                        --project=chromium \
+                        --reporter=allure-playwright,list \
+                        --output=test-results/nightly-visual
+                """
+            }
+        }
+
+        stage('Allure Report') {
+            steps {
+                allure([
+                    includeProperties: false,
+                    reportBuildPolicy: 'ALWAYS',
+                    results: [[path: 'allure-results']]
+                ])
+            }
+        }
+    }
+
+    post {
+        always {
+            publishHTML([
+                allowMissing: true,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: 'playwright-report',
+                reportFiles: 'index.html',
+                reportName: 'Nightly Playwright Report'
+            ])
+            archiveArtifacts artifacts: 'allure-results/**', allowEmptyArchive: true
+        }
+        failure {
+            mail to: 'qa-team@yourcompany.com',
+                 subject: "NIGHTLY FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                 body: "Nightly regression failed.\nCheck: ${env.BUILD_URL}\nAllure: ${env.BUILD_URL}allure/"
+        }
+        cleanup {
+            cleanWs()
+        }
+    }
+}
