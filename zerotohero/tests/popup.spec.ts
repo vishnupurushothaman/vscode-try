@@ -1,4 +1,4 @@
-import {test, expect, Page} from '@playwright/test';
+import {test, expect} from '@playwright/test';
 
 test.describe('Popup Handling', () => {
 
@@ -72,22 +72,7 @@ test.describe('Popup Handling', () => {
 
         //successfully handled the prompt
     })
+
+
+})
    
-    test('child window handling @reg ',async ({page})=>{
-
-        const [newPage] = await Promise.all([
-
-            page.context().waitForEvent('page'),
-            page.getByRole('button', { name: 'New Tab' }).click()])
-
-            await newPage.waitForLoadState();
-
-
-            console.log(newPage.url());
-             await newPage.close();
-
-
-    });
-
-
-    });
